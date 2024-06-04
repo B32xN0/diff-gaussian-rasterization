@@ -140,6 +140,64 @@ class _RasterizeGaussians(torch.autograd.Function):
         else:
              grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
 
+        # TODO Project all grad_means3D to nearest point directions from raster_settings.nearest_points
+        k = raster_settings.nearest_points.shape[1]
+
+        vectors2nearest = raster_settings.nearest_points - means3D[:, None, :].expand(-1, k, -1)
+        # print("Nearest:", torch.sum(nearest))
+        # print("Means3D", torch.sum(means3D))
+        # TODO normalize directions
+        distance2nearest = torch.linalg.norm(vectors2nearest, dim=-1, keepdim=True).expand(-1, -1, 3)
+        directions2nearest = vectors2nearest / torch.clamp(distance2nearest, torch.finfo(torch.float32).eps)
+        # directions = directions / (dir_norm + torch.finfo(torch.float32).eps)
+        # directions = directions / torch.clamp(dir_norm, 1.)
+        # del vectors2nearest
+
+        grad_length = torch.linalg.norm(grad_means3D, dim=-1, keepdim=True).expand(-1, 3)
+        # grad_direction = grad_means3D / (grad_length + torch.finfo(torch.float32).eps)
+        # grad_direction = grad_means3D / torch.clamp(grad_length, 1.)
+        # grad_direction = grad_means3D
+        grad_directions = grad_means3D / torch.clamp(grad_length, torch.finfo(torch.float32).eps)
+
+        similarity = torch.sum(directions2nearest * grad_directions[:, None, :].expand(-1, k, -1), -1, keepdim=True)
+        # del grad_directions
+        torch.clamp(similarity, 0)  # TODO zero?
+        similarity = similarity / k
+
+        weighted_directions = similarity.expand(-1, -1, 3) * directions2nearest * torch.minimum(distance2nearest, grad_length[:, None, :].expand(-1, k, -1))
+        # print("Grad Max", torch.max(grad_length))
+        # print("Nearest Max", torch.max(distance2nearest))
+        # weighted_directions = similarity.expand(-1, -1, 3) * directions2nearest * distance2nearest
+        # del directions2nearest, distance2nearest, grad_length, similarity, k
+        new_gradient = torch.sum(weighted_directions, 1)
+        # del weighted_directions
+
+        # new_gradient = new_gradient * torch.min(grad_length, torch.mean(dir_norm, dim=1))
+        # new_gradient = new_gradient * (1./float(k)) * grad_length
+        # new_gradient = new_gradient * (1./float(k))
+
+        # similarity_normalization = torch.sum(similarity, 1).expand(-1, 3)
+        # new_gradient = new_gradient / similarity_normalization
+
+        grad_means3D = new_gradient
+        # del new_gradient
+        # grad_means3D = torch.zeros_like(grad_means3D)
+        # grad_means2D = torch.zeros_like(grad_means2D)
+
+        # torch.cuda.empty_cache()
+
+        # clip scaling
+        # with torch.no_grad():
+            # boundary = torch.quantile(scales, 0.05)
+        ### TODO Latest, uncomment two lines:
+        # boundary = 0.01
+        # grad_scales = torch.where(scales <= boundary, grad_scales, torch.minimum(grad_scales, -torch.ones_like(grad_scales)))
+
+        # grad_scales = grad_scales_new
+        # del boundary
+
+        # torch.cuda.empty_cache()
+
         grads = (
             grad_means3D,
             grad_means2D,
@@ -167,6 +225,7 @@ class GaussianRasterizationSettings(NamedTuple):
     campos : torch.Tensor
     prefiltered : bool
     debug : bool
+    nearest_points : torch.Tensor
 
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):
